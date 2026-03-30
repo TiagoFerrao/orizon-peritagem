@@ -961,11 +961,57 @@ function initLang() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// STATE & CHECKBOXES — checked = strikethrough (excluded from PDF)
+// SUPABASE CLOUD DATABASE — shared state for all residents
 // ═══════════════════════════════════════════════════════════
+// These are PUBLIC keys — safe to embed in frontend code.
+// Security is handled by Row Level Security (RLS) policies in the database.
+const SUPABASE_URL = 'https://mvsvfroqbgkqpwqvbkna.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_GO1wSWvm-P-4cK2SBwZJHA_MdxcG0yS';
+const SUPABASE_TABLE = 'shared_state';
 const STORAGE_KEY = 'orizon_peritagem_v3';
+
+// Load state from Supabase (cloud) with localStorage as fallback cache
+async function loadStateFromCloud() {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?id=eq.main`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (res.ok) {
+      const rows = await res.json();
+      if (rows.length > 0 && rows[0].state) {
+        // Cache in localStorage for offline/fast load
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(rows[0].state));
+        return rows[0].state;
+      }
+    }
+  } catch (e) { console.warn('Cloud load failed, using local cache:', e); }
+  // Fallback: use localStorage cache
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch { return {}; }
+}
+
+// Save state to Supabase (debounced — waits 500ms after last change before saving)
+let _saveTimeout = null;
+function saveState(s) {
+  // Always save to localStorage immediately (fast local cache)
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {}
+  // Debounce cloud save — if user clicks rapidly, only send the final state
+  clearTimeout(_saveTimeout);
+  _saveTimeout = setTimeout(() => {
+    fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?id=eq.main`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ state: s, updated_at: new Date().toISOString() })
+    }).catch(e => console.warn('Cloud save failed:', e));
+  }, 500);
+}
+
+// Backwards-compatible sync load for initial render (uses cache, then updates from cloud)
 function loadState() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch { return {}; } }
-function saveState(s) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {} }
 let state = loadState();
 
 function onCheck(cb) {
@@ -996,6 +1042,7 @@ function resetAll() {
   if (!confirm(msg)) return;
   localStorage.removeItem(STORAGE_KEY);
   state = {};
+  saveState(state); // Also clear cloud state
   document.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.checked = false;
     const i = document.getElementById('ci-'+cb.id.replace('cb-',''));
@@ -1084,6 +1131,25 @@ document.addEventListener('DOMContentLoaded', () => {
   initLang();
   restoreAddedItems();
   restoreCheckboxes();
+
+  // After initial fast render from cache, fetch latest state from cloud
+  // This ensures everyone sees the same shared data
+  loadStateFromCloud().then(cloudState => {
+    state = cloudState;
+    // Re-render checkboxes and added items with cloud data
+    document.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      if (state[cb.id] !== undefined) {
+        cb.checked = state[cb.id];
+        const item = document.getElementById('ci-' + cb.id.replace('cb-', ''));
+        if (item) item.classList.toggle('checked', cb.checked);
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('row-checked', cb.checked);
+      }
+    });
+    // Re-render added items from cloud
+    document.querySelectorAll('.added-items').forEach(el => el.innerHTML = '');
+    restoreAddedItems();
+  });
 });
 </script>
 </body>
